@@ -9,14 +9,15 @@ pip install cryptography
 export ANDROID_API_LEVEL=28
 pip install websockify
 
-cd ~/Termux-Nino-OS-WebUI/FileBrowserQuantum/backend
+cd ~/Termux-Nino-OS-WebUI/FileBrowserQuantum
 make
 make build
+cd ~/Termux-Nino-OS-WebUI/FileBrowserQuantum/backend
 ./filebrowser &
 
 sleep 2
 
-cd ~/Nano-OS-Interface/noVNC
+cd ~/Termux-Nino-OS-WebUI/noVNC
 vncpasswd
 vncserver -kill :0 2>/dev/null || true
 vncserver :0 -xstartup "lxqt-session" &
