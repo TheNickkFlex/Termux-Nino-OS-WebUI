@@ -9,7 +9,7 @@ pip install cryptography
 export ANDROID_API_LEVEL=28
 pip install websockify
 
-cd ~/Termux-Nino-OS-WebUI/FileBrowserQuantum
+cd ~/Termux-Nino-OS-WebUI/FileBrowserQuantum/frontend
 npm cache clean --force 
 npm install
 npm run build &
