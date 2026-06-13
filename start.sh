@@ -1,7 +1,6 @@
  
 #!/data/data/com.termux/files/usr/bin/bash
 
-# Forçar renderização por software para o VNC não capotar
 export GALLIUM_DRIVER=llvmpipe
 
 apt update -y
@@ -13,19 +12,15 @@ pip install cryptography --break-system-packages 2>/dev/null || pip install cryp
 export ANDROID_API_LEVEL=28
 pip install websockify --break-system-packages 2>/dev/null || pip install websockify
 
-# --- CORREÇÃO DO FRONTEND ---
 cd ~/Termux-Nino-OS-WebUI/FileBrowserQuantum/frontend
-# Removendo --no-bin-links para que o vite e vue-tsc funcionem corretamente no Termux
 if [ ! -d "node_modules" ]; then
     npm install
 fi
 
-# Build do frontend
 npx vite build --outDir ../backend/http/dist
 mkdir -p ../backend/http/embed
 cp -r ../backend/http/dist/* ../backend/http/embed/ 2>/dev/null || true
 
-# --- COMPILAÇÃO DO BACKEND ---
 cd ~/Termux-Nino-OS-WebUI/FileBrowserQuantum/backend
 if [ ! -f ./filebrowser ]; then
     echo "Compilando o executável do FileBrowser..."
@@ -35,12 +30,10 @@ fi
 
 sleep 2
 
-# --- INICIALIZAÇÃO DO VNC ---
 cd ~/Termux-Nino-OS-WebUI/noVNC
 vncserver -kill :0 2>/dev/null || true
 rm -rf /tmp/.X0-lock /tmp/.X11-unix/X0
 
-# Criando um xstartup temporário para garantir que o LXQt suba
 XSTARTUP_TEMP=$(mktemp)
 echo "#!/bin/sh" > $XSTARTUP_TEMP
 echo "exec lxqt-session" >> $XSTARTUP_TEMP
