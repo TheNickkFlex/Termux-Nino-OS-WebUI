@@ -12,7 +12,7 @@ pip install websockify
 cd ~/Termux-Nino-OS-WebUI/FileBrowserQuantum
 npm cache clean --force 
 npm install
-npm run build
+npm run build &
 
 cd ~/Termux-Nino-OS-WebUI/FileBrowserQuantum/backend
 ./filebrowser &
