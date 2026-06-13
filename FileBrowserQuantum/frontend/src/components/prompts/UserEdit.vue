@@ -1,0 +1,700 @@
+<template>
+  <div class="card-content">
+    <errors v-if="error" :errorCode="error.status" />
+    <h2 class="message" v-if="user.loginMethod !== 'password' && !stateUser.permissions.admin">
+      <i class="material-symbols-outlined">sentiment_dissatisfied</i>
+      <span>{{ $t("files.lonely") }}</span>
+    </h2>
+    <div v-if="showPasswordChangeSection">
+      <label for="password">{{ $t("general.password") }}</label>
+      <div class="form-flex-group">
+        <input class="input form-form" :class="{ 'form-invalid': invalidPassword }" aria-label="Password1"
+          type="password" autocomplete="new-password" :placeholder="$t('settings.enterPassword')"
+          v-model="passwordRef" />
+      </div>
+      <div class="form-flex-group">
+        <input class="input form-form" :class="{ 'flat-right': !isNew, 'form-invalid': invalidPassword }"
+          aria-label="Password2" type="password" autocomplete="new-password"
+          :placeholder="$t('settings.enterPasswordAgain')" v-model="user.password" id="password" />
+        <button
+          v-if="!isNew"
+          type="button"
+          class="button form-button flat-left"
+          :disabled="!canUpdatePassword"
+          @click="submitUpdatePassword"
+        >
+          {{ $t("general.update") }}
+        </button>
+      </div>
+      <div style="display: flex; flex-direction: column">
+        <div class="settings-items">
+          <ToggleSwitch class="item" v-model="user.otpEnabled" :name="$t('otp.name')" />
+        </div>
+        <button class="button" type="button" v-if="user.otpEnabled" @click="newOTP" aria-label="Generate Code">
+          {{ $t("buttons.generateNewOtp") }}
+        </button>
+      </div>
+      <hr />
+    </div>
+    <div v-if="globalVars.passkeyAvailable" style="margin-top: 0.5em;">
+      <label>{{ $t("profileSettings.passkeys") }}</label>
+      <div v-if="user.passkeyCredentials && user.passkeyCredentials.length > 0" class="passkey-list">
+        <div v-for="pk in user.passkeyCredentials" :key="pk.id" class="passkey-item">
+          <div class="passkey-info">
+            <span class="passkey-name">{{ pk.name || $t("profileSettings.passkeyDefaultName") }}</span>
+            <span class="passkey-meta">
+              {{ $t("profileSettings.created") }} {{ formatDate(pk.createdAt) }}<span v-if="pk.lastUsedAt" class="passkey-last-used">{{ $t("profileSettings.lastUsed") }} {{ formatDate(pk.lastUsedAt) }}</span>
+            </span>
+          </div>
+          <button type="button" class="button button--flat button--red" @click="deletePasskey(pk.id)">
+            {{ $t("general.delete") }}
+          </button>
+        </div>
+      </div>
+      <div v-else class="passkey-empty">
+        {{ $t("profileSettings.noPasskeys") }}
+      </div>
+      <button type="button" class="button" style="margin-top: 0.5em;" :disabled="addingPasskey" @click="addPasskey">
+        {{ addingPasskey ? $t("profileSettings.addingPasskey") : $t("profileSettings.addPasskey") }}
+      </button>
+    </div>
+    <div v-if="stateUser.permissions.admin">
+      <p v-if="isNew">
+        <label for="username">{{ $t("general.username") }}</label>
+        <input class="input" type="text" v-model="user.username" id="username" @input="emitUpdate" />
+      </p>
+
+      <div v-if="user.loginMethod === 'password' && globalVars.passwordAvailable && isNew">
+        <label for="password">{{ $t("general.password") }}</label>
+        <div class="form-flex-group">
+          <input class="input form-form" :class="{ 'form-invalid': invalidPassword }" aria-label="Password1"
+            type="password" :placeholder="$t('settings.enterPassword')" v-model="passwordRef" />
+        </div>
+        <div class="form-flex-group">
+          <input class="input form-form" :class="{ 'flat-right': !isNew, 'form-invalid': invalidPassword }"
+            type="password" :placeholder="$t('settings.enterPasswordAgain')" aria-label="Password2"
+            v-model="user.password" autocomplete="new-password" id="password" />
+          <button
+            v-if="!isNew"
+            type="button"
+            class="button form-button flat-left"
+            :disabled="!canUpdatePassword"
+            @click="submitUpdatePassword"
+          >
+            {{ $t("general.update") }}
+          </button>
+        </div>
+      </div>
+
+      <div v-if="user.loginMethod === 'password' && globalVars.passwordAvailable" class="settings-items">
+        <ToggleSwitch v-if="user.loginMethod === 'password' && stateUser.permissions?.admin" class="item"
+          :modelValue="user.lockPassword" @update:modelValue="(val) => updateUserField('lockPassword', val)"
+          :name="$t('settings.lockPassword')" />
+      </div>
+
+      <div style="padding-bottom: 1em" v-if="stateUser.permissions.admin">
+        <label for="scopes">{{ $t("settings.scopes") }}</label>
+        <div class="scope-list" :class="{ 'form-invalid': duplicateSources.includes(source.name) }"
+          v-for="(source, index) in selectedSources" :key="index">
+          <select @change="handleSourceChange(source, $event, source.name)" class="input flat-right source-dropdown"
+            v-model="source.name">
+            <option v-for="s in sourceList" :key="s.name" :value="s.name">
+              {{ s.name }}
+            </option>
+          </select>
+
+          <div
+            :aria-label="`user-edit-scope-path-${index}`"
+            class="clickable button flat-left scope-path-display"
+            :class="{ 'flat-right': selectedSources.length > 1 }"
+            @click="onScopePathRowClick(index, source)"
+          >{{ scopePathDisplay(source) }}
+          </div>
+          <button v-if="selectedSources.length > 1" type="button" class="button flat-left no-height" @click="removeScope(index)">
+            <i class="material-symbols material-size">delete</i>
+          </button>
+        </div>
+      </div>
+
+      <button v-if="hasMoreSources" @click="addNewScopeSource" type="button" class="button no-height">
+        <i class="material-symbols material-size">add</i>
+      </button>
+
+      <p v-if="stateUser.username !== user.username">
+        <label for="locale">{{ $t("general.language") }}</label>
+        <languages class="input" id="locale" v-model:locale="user.locale" @input="emitUpdate"></languages>
+      </p>
+      <div v-if="stateUser.permissions.admin">
+        <label for="loginMethod">{{ $t("settings.loginMethodDescription") }}</label>
+        <select v-model="user.loginMethod" class="input" id="loginMethod">
+          <option v-if="globalVars.passwordAvailable" value="password">{{ $t("settings.loginMethods.password") }}</option> <!-- eslint-disable-line @intlify/vue-i18n/no-raw-text -->
+          <option v-if="globalVars.oidcAvailable" value="oidc">OIDC</option> <!-- eslint-disable-line @intlify/vue-i18n/no-raw-text -->
+          <option v-if="globalVars.proxyAvailable" value="proxy">Proxy</option> <!-- eslint-disable-line @intlify/vue-i18n/no-raw-text -->
+          <option v-if="globalVars.ldapAvailable" value="ldap">LDAP</option> <!-- eslint-disable-line @intlify/vue-i18n/no-raw-text -->
+          <option value="jwt">JWT</option> <!-- eslint-disable-line @intlify/vue-i18n/no-raw-text -->
+        </select>
+      </div>
+      <permissions v-if="stateUser.permissions.admin" :permissions="user.permissions" />
+    </div>
+  </div>
+
+  <div class="card-actions">
+    <button type="button" class="button button--flat button--grey" @click="closeTopPrompt" :aria-label="$t('general.cancel')"
+      :title="$t('general.cancel')">
+      {{ $t("general.cancel") }}
+    </button>
+    <button v-if="!isNew" @click.prevent="deletePrompt" type="button" class="button button--flat button--red"
+      aria-label="Delete User" :title="$t('general.delete')">
+      {{ $t("general.delete") }}
+    </button>
+    <button @click="save" type="button" class="button button--flat" :aria-label="$t('general.save')" :title="$t('general.save')">
+      {{ $t("general.save") }}
+    </button>
+  </div>
+</template>
+
+<script>
+import { mutations, state } from "@/store";
+import { usersApi, settingsApi, authApi } from "@/api";
+import Languages from "@/components/settings/Languages.vue";
+import Permissions from "@/components/settings/Permissions.vue";
+import ToggleSwitch from "@/components/settings/ToggleSwitch.vue";
+import Errors from "@/views/Errors.vue";
+import { notify } from "@/notify";
+import { globalVars } from "@/utils/constants";
+import { eventBus } from "@/store/eventBus";
+
+export default {
+  name: "user-edit",
+  components: {
+    Languages,
+    Permissions,
+    ToggleSwitch,
+    Errors,
+  },
+  props: {
+    userId: {
+      type: [String, Number],
+      required: false,
+    },
+    promptId: {
+      type: [String, Number],
+      required: false,
+    },
+  },
+  data() {
+    return {
+      error: null,
+      originalUser: null,
+      user: {
+        scopes: [],
+        username: "",
+        password: "",
+        permissions: { admin: false },
+        otpEnabled: false,
+        loginMethod: null, // Will be set based on available methods
+      },
+      showDelete: false,
+      createUserDir: false,
+      loaded: false,
+      originalUserScope: ".",
+      sourceList: [],
+      availableSources: [],
+      selectedSources: [],
+      passwordRef: "",
+      pendingScopeSelectionContextId: null,
+      pendingScopeIndex: null,
+      addingPasskey: false,
+    };
+  },
+  async created() {
+    await this.fetchData();
+    await this.initializeForm();
+  },
+  mounted() {
+    eventBus.on("pathSelected", this.onPathSelectedFromPicker);
+    eventBus.on("pathPickerCancelled", this.onPathPickerCancelled);
+  },
+  beforeUnmount() {
+    eventBus.off("pathSelected", this.onPathSelectedFromPicker);
+    eventBus.off("pathPickerCancelled", this.onPathPickerCancelled);
+  },
+  computed: {
+    actor() {
+      return state.user;
+    },
+    settings() {
+      return state.settings;
+    },
+    isNew() {
+      return !this.userId;
+    },
+    stateUser() {
+      return state.user;
+    },
+    invalidPassword() {
+      const matching =
+        this.user.password !== this.passwordRef && this.user.password.length > 0;
+      return matching;
+    },
+    /** Update is allowed only when both password fields are non-empty (trimmed) and match. */
+    canUpdatePassword() {
+      const a = String(this.passwordRef ?? "").trim();
+      const b = String(this.user.password ?? "").trim();
+      if (a.length === 0 || b.length === 0) {
+        return false;
+      }
+      return !this.invalidPassword;
+    },
+    passwordAvailable: () => globalVars.passwordAvailable,
+    globalVars: () => globalVars,
+    duplicateSources() {
+      const names = this.selectedSources.map((s) => s.name);
+      return names.filter((name, idx) => names.indexOf(name) !== idx);
+    },
+    hasMoreSources() {
+      return this.selectedSources.length < this.sourceList.length;
+    },
+    passwordPlaceholder() {
+      return this.isNew ? "" : this.$t("settings.avoidChanges");
+    },
+    /** Password change (existing user): target and signed-in user must both use password login. */
+    showPasswordChangeSection() {
+      return (
+        !this.isNew &&
+        this.user.loginMethod === "password" &&
+        this.stateUser.loginMethod === "password" &&
+        this.globalVars.passwordAvailable
+      );
+    },
+    firstAvailableLoginMethod() {
+      if (this.globalVars.passwordAvailable) return "password";
+      if (this.globalVars.oidcAvailable) return "oidc";
+      if (this.globalVars.proxyAvailable) return "proxy";
+      if (this.globalVars.ldapAvailable) return "ldap";
+      return "password"; // fallback
+    },
+  },
+  watch: {
+    stateUser() {
+      this.user.otpEnabled = state.user.otpEnabled;
+      this.emitUserUpdate();
+    },
+    globalVars: {
+      handler() {
+        // Set loginMethod when globalVars becomes available
+        if (this.isNew) {
+          this.setDefaultLoginMethod();
+        }
+      },
+      immediate: true
+    },
+  },
+  methods: {
+    closeTopPrompt() {
+      mutations.closeTopPrompt();
+    },
+    async fetchData() {
+      mutations.setLoading("users", true);
+      try {
+        if (this.isNew) {
+          const defaults = await settingsApi.get("userDefaults");
+          this.user = defaults;
+          this.user.password = "";
+          // Ensure loginMethod is valid, set to first available method if not set or invalid
+          const validMethods = [];
+          if (this.globalVars.passwordAvailable) validMethods.push("password");
+          if (this.globalVars.oidcAvailable) validMethods.push("oidc");
+          if (this.globalVars.proxyAvailable) validMethods.push("proxy");
+          if (this.globalVars.ldapAvailable) validMethods.push("ldap");
+          if (this.globalVars.jwtAvailable) validMethods.push("jwt");
+
+          if (!this.user.loginMethod || !validMethods.includes(this.user.loginMethod)) {
+            this.user.loginMethod = this.firstAvailableLoginMethod;
+          }
+        } else {
+          const id = this.userId;
+          if (id === undefined) {
+            return;
+          }
+          this.user = { ...(await usersApi.get(id)) };
+          this.user.password = "";
+          // Normalize scopes to ensure they're in {name, scope} format only
+          if (this.user.scopes && Array.isArray(this.user.scopes)) {
+            this.user.scopes = this.user.scopes.map(scope => {
+              // If it's already in the correct format, use it
+              if (scope.name !== undefined && scope.scope !== undefined) {
+                return { name: scope.name, scope: scope.scope || "" };
+              }
+              // If it's a full source object, extract just name and scope
+              if (scope.name && typeof scope.name === 'string') {
+                return { name: scope.name, scope: scope.scope || "" };
+              }
+              // Fallback: try to extract from any object structure
+              return { name: "", scope: "" };
+            });
+          }
+          // Ensure loginMethod is valid, set to first available method if not set or invalid
+          const validMethods = [];
+          if (this.globalVars.passwordAvailable) validMethods.push("password");
+          if (this.globalVars.oidcAvailable) validMethods.push("oidc");
+          if (this.globalVars.proxyAvailable) validMethods.push("proxy");
+          if (this.globalVars.ldapAvailable) validMethods.push("ldap");
+          if (this.globalVars.jwtAvailable) validMethods.push("jwt");
+
+          if (!this.user.loginMethod || !validMethods.includes(this.user.loginMethod)) {
+            this.user.loginMethod = this.firstAvailableLoginMethod;
+          }
+        }
+      } catch (e) {
+        this.error = e;
+      } finally {
+        mutations.setLoading("users", false);
+        this.loaded = true;
+        // Update prompt name after user data is loaded
+        this.updatePromptTitle();
+      }
+    },
+    async initializeForm() {
+      if (!this.stateUser.permissions.admin) {
+        this.sourceList = this.user.scopes || [];
+      } else {
+        this.sourceList = await settingsApi.get("sources");
+      }
+
+      this.user.password = this.user.password || "";
+      // Set default login method
+      this.setDefaultLoginMethod();
+      this.selectedSources = this.user.scopes || [];
+      this.availableSources = this.sourceList.filter(
+        (s) => !this.selectedSources.some((sel) => sel.name === s.name)
+      );
+
+      if (this.isNew && this.availableSources.length) {
+        const newSource = this.availableSources.shift();
+        if (newSource) {
+          // Only store {name, scope} format, not the full source config
+          this.selectedSources.push({
+            name: newSource.name || "",
+            scope: "" // Empty scope - backend will handle defaults
+          });
+          this.emitUserUpdate();
+        }
+      }
+    },
+    deletePrompt() {
+      mutations.showPrompt({
+        name: "generic",
+        props: {
+          title: this.$t("general.delete"),
+          body: this.$t("prompts.deleteUserMessage", { username: this.user.username }),
+          buttons: [
+            {
+              label: this.$t("general.delete"),
+              action: async () => {
+                try {
+                  await usersApi.remove(this.user.id, {
+                    actorPasswordPromptI18nKey: "prompts.confirmPasswordToSaveUser",
+                  });
+                  notify.showSuccessToast(this.$t("settings.userDeleted"));
+                  eventBus.emit('usersChanged');
+                  mutations.closeTopPrompt(); // close delete user prompt confirmation
+                  mutations.closeTopPrompt(); // close user prompt since user doens't exist anymore
+                } catch (e) {
+                  console.error(e);
+                  notify.showError(e);
+                }
+              },
+            },
+          ],
+        },
+      });
+    },
+    async save(event) {
+      event.preventDefault();
+      try {
+        const fields = ["all"];
+        // Transform selectedSources to only include {name, scope} format
+        // Empty scope strings should be passed as "" for backend to handle defaults
+        const scopesToSend = this.selectedSources.map(source => ({
+          name: source.name || "",
+          scope: source.scope || ""
+        }));
+
+        if (this.isNew) {
+          if (!state.user.permissions.admin) {
+            notify.showError(this.$t("settings.userNotAdmin"));
+            return;
+          }
+          await usersApi.create(
+            { ...this.user, scopes: scopesToSend },
+            {
+              actorPasswordPromptI18nKey: "prompts.confirmPasswordToSaveUser",
+            }
+          );
+          // Emit event to refresh user list
+          eventBus.emit('usersChanged');
+          // Close the prompt
+          mutations.closeTopPrompt();
+        } else {
+          await usersApi.update({ ...this.user, scopes: scopesToSend }, fields);
+          eventBus.emit('usersChanged');
+          notify.showSuccessToast(this.$t("settings.userUpdated"));
+          mutations.closeTopPrompt();
+        }
+      } catch (e) {
+        notify.showError(e);
+      }
+    },
+    newOTP() {
+      mutations.showPrompt({
+        name: "password",
+        props: {
+          infoText: this.$t("prompts.confirmPasswordToSaveUser"),
+          submitLabel: this.$t("general.confirm"),
+          submitCallback: (accountPassword) => {
+            mutations.showPrompt({
+              name: "totp",
+              props: {
+                generate: true,
+                username: this.user.username,
+                password: accountPassword,
+              },
+            });
+          },
+        },
+      });
+    },
+    async submitUpdatePassword() {
+      event.preventDefault();
+      if (!this.canUpdatePassword) {
+        return;
+      }
+      try {
+        await usersApi.update(this.user, ["password"], {
+          actorPasswordPromptI18nKey: "prompts.confirmPasswordToSaveUser",
+        });
+        eventBus.emit("usersChanged");
+        notify.showSuccessToast(this.$t("settings.userUpdated"));
+      } catch (e) {
+        notify.showError(e);
+      }
+    },
+    emitUserUpdate() {
+      // Update the user object with current scopes
+      this.user = { ...this.user, scopes: this.selectedSources };
+      // Ensure loginMethod is preserved
+      if (!this.user.loginMethod) {
+        this.user.loginMethod = this.firstAvailableLoginMethod;
+      }
+    },
+    emitUpdate() {
+      // Update the user object
+      this.user = { ...this.user };
+      // Ensure loginMethod is preserved
+      if (!this.user.loginMethod) {
+        this.user.loginMethod = this.firstAvailableLoginMethod;
+      }
+    },
+    setUpdatePassword() {
+      // This method is kept for compatibility but not used in the new structure
+    },
+    onScopePathRowClick(index, source) {
+      if (!source?.name) {
+        return;
+      }
+      this.openScopePicker(index);
+    },
+    scopePathDisplay(source) {
+      const s = source?.scope;
+      if (s !== undefined && s !== null && String(s).length > 0) {
+        return s;
+      }
+      return "/";
+    },
+    openScopePicker(index) {
+      const row = this.selectedSources[index];
+      if (!row?.name) {
+        return;
+      }
+      const selectionContextId = `user-scope-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+      this.pendingScopeSelectionContextId = selectionContextId;
+      this.pendingScopeIndex = index;
+      const initialPath =
+        row.scope && typeof row.scope === "string" && row.scope.length > 0 ? row.scope : "/";
+      mutations.showPrompt({
+        name: "pathPicker",
+        props: {
+          currentPath: initialPath,
+          currentSource: row.name,
+          hideDestinationSource: true,
+          selectionContextId,
+        },
+      });
+    },
+    onPathPickerCancelled(data) {
+      if (!this.pendingScopeSelectionContextId || !data) {
+        return;
+      }
+      if (data.selectionContextId !== this.pendingScopeSelectionContextId) {
+        return;
+      }
+      this.pendingScopeSelectionContextId = null;
+      this.pendingScopeIndex = null;
+    },
+    onPathSelectedFromPicker(data) {
+      if (!this.pendingScopeSelectionContextId) {
+        return;
+      }
+      if (!data || data.selectionContextId !== this.pendingScopeSelectionContextId) {
+        return;
+      }
+      this.pendingScopeSelectionContextId = null;
+      const idx = this.pendingScopeIndex;
+      this.pendingScopeIndex = null;
+      if (idx === null || idx === undefined || typeof data.path !== "string") {
+        return;
+      }
+      const path = data.path;
+      const next = this.selectedSources.map((s, i) =>
+        i === idx ? { ...s, scope: path } : s
+      );
+      this.selectedSources = next;
+      this.emitUserUpdate();
+    },
+    addNewScopeSource(event) {
+      event.preventDefault();
+      if (this.hasMoreSources) {
+        this.selectedSources.push({ name: "", scope: "" });
+        this.emitUserUpdate();
+      }
+    },
+    removeScope(index) {
+      const removed = this.selectedSources.splice(index, 1)[0];
+      this.availableSources.push({ name: removed.name });
+      this.emitUserUpdate();
+    },
+    handleSourceChange(source, event, oldName) {
+      const newName = event.target.value;
+      this.availableSources = this.availableSources.filter((s) => s.name !== newName);
+      if (oldName && !this.availableSources.find((s) => s.name === oldName)) {
+        this.availableSources.push({ name: oldName });
+      }
+      source.name = newName;
+      this.emitUserUpdate();
+    },
+    updateUserField(field, value) {
+      this.user[field] = value;
+      this.emitUserUpdate();
+    },
+    setDefaultLoginMethod() {
+      // Set loginMethod to first available method if not already set or if current value is invalid
+      const validMethods = [];
+      if (this.globalVars.passwordAvailable) validMethods.push("password");
+      if (this.globalVars.oidcAvailable) validMethods.push("oidc");
+      if (this.globalVars.proxyAvailable) validMethods.push("proxy");
+      if (this.globalVars.ldapAvailable) validMethods.push("ldap");
+      if (this.globalVars.jwtAvailable) validMethods.push("jwt");
+
+      const isValidMethod = validMethods.includes(this.user.loginMethod);
+
+      if (!this.user.loginMethod || this.user.loginMethod === null || !isValidMethod) {
+        this.user.loginMethod = this.firstAvailableLoginMethod;
+      }
+    },
+    updatePromptTitle() {
+      // Update the prompt display name to show the username
+      // This allows the title to show the actual username instead of just the generic "user-edit" title
+      const displayName = this.isNew
+        ? this.$t("settings.newUser")
+        : `${this.$t("settings.modifyOtherUser")} ${this.user.username}`;
+      mutations.updatePromptTitle(this.promptId, displayName);
+    },
+    async addPasskey() {
+      this.addingPasskey = true;
+      try {
+        await authApi.beginPasskeyRegistration();
+        notify.showSuccessToast(this.$t("profileSettings.passkeyAdded"));
+        setTimeout(() => { window.location.reload(); }, 500);
+      } catch (err) {
+        notify.showError(err.message || this.$t("profileSettings.passkeyAddFailed"));
+      } finally {
+        this.addingPasskey = false;
+      }
+    },
+    async deletePasskey(id) {
+      try {
+        await authApi.deletePasskeyCredential(id);
+        notify.showSuccessToast(this.$t("profileSettings.passkeyDeleted"));
+        setTimeout(() => { window.location.reload(); }, 500);
+      } catch (err) {
+        notify.showError(err.message || this.$t("profileSettings.passkeyDeleteFailed"));
+      }
+    },
+    formatDate(timestamp) {
+      if (!timestamp) return "";
+      const date = new Date(timestamp * 1000);
+      return date.toLocaleDateString();
+    },
+  },
+};
+</script>
+
+<style scoped>
+.scope-list {
+  display: flex;
+  align-items: stretch;
+}
+
+.source-dropdown {
+  width: unset;
+}
+
+.scope-path-display {
+  width: 100%;
+}
+
+.no-height {
+  height: unset;
+}
+
+.material-size {
+  font-size: 1em !important;
+}
+
+.passkey-list {
+  margin-top: 0.3em;
+}
+
+.passkey-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.3em 0;
+  border-bottom: 1px solid var(--borderColor, #ddd);
+}
+
+.passkey-name {
+  font-weight: 500;
+}
+
+.passkey-meta {
+  font-size: 0.8em;
+  color: var(--textSecondary, #888);
+}
+
+.passkey-last-used::before {
+  content: " · ";
+}
+
+.passkey-info {
+  display: flex;
+  flex-direction: column;
+}
+
+.passkey-empty {
+  padding: 0.3em 0;
+  color: var(--textSecondary, #888);
+  font-size: 0.8em;
+}
+</style>

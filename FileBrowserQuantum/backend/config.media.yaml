@@ -1,0 +1,10 @@
+userDefaults:
+  preview:
+    image: true
+    video: true
+    audio: true
+    motionVideoPreview: true
+    office: true
+    popup: true
+    folder: true
+    models: true

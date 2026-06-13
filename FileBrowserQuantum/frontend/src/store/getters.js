@@ -1,0 +1,654 @@
+import * as i18n from '@/i18n';
+import { mutations, state } from '@/store';
+import { url } from '@/utils';
+import { globalVars, previewViews, tools } from '@/utils/constants';
+import { getFileExtension } from '@/utils/files.js';
+import { getTypeInfo } from '@/utils/mimetype';
+import { fromNow } from '@/utils/moment';
+import { getNestedProperty, getObjectProperty } from '@/utils/object.js';
+import { buildItemUrl, removeLeadingSlash, removePrefix } from '@/utils/url.js';
+
+export const getters = {
+  displayPreferenceFor: (source, path) => {
+    const sourceKey = getters.isShare() ? getters.currentHash() : source;
+    if (!sourceKey || !path) {
+      return null;
+    }
+    return getNestedProperty(state.displayPreferences, sourceKey, path) || null;
+  },
+  eventTheme: () => {
+    if (getters.isShare()) {
+      return "";
+    }
+    if (!globalVars.eventBasedThemes) {
+      return ""
+    }
+    if (state.disableEventThemes) {
+      return ""
+    }
+    // if date is halloween october 31st, return halloween
+    if (new Date().getMonth() === 9 && new Date().getDate() === 31) {
+      return "halloween";
+    }
+    return "";
+  },
+  getTime: timestamp => {
+    if (state.user.dateFormat) {
+      // Truncate the fractional seconds to 3 digits (milliseconds)
+      const sanitizedString = timestamp.replace(/\.\d+/, match =>
+        match.slice(0, 4)
+      )
+      // Parse the sanitized string into a Date object
+      const date = new Date(sanitizedString)
+      return date.toLocaleString()
+    }
+    return fromNow(timestamp, state.user.locale)
+  },
+  isPreviewView: () => {
+    const cv = getters.currentView()
+    return previewViews.includes(cv)
+  },
+  isScrollable: () => {
+    if (getters.currentView() === 'markdownViewer') {
+      return true
+    }
+    if (getters.isPreviewView()) {
+      return false
+    }
+    return true
+  },
+  displayPreference: () => {
+    let source = state.sources.current;
+    if (getters.isShare()) {
+      source = getters.currentHash();
+    }
+    let path = state.route.path;
+
+    if (state.req.type !== "directory") {
+      path = path.substring(0, path.lastIndexOf("/") + 1) || "/";
+    }
+  
+    return getters.displayPreferenceFor(source, path);
+  },
+  viewMode: () => {
+    if (!state.user || state.user?.username === "") {
+      return "normal";
+    }
+    const isShare = getters.isShare();
+    const displayPref = getters.displayPreference();
+    // Priority 1: If there's a saved display preference for this specific share/path, use it
+    if (displayPref?.viewMode) {
+      return displayPref.viewMode;
+    }
+    // Priority 2: If it's a share and shareInfo.viewMode is set, use that as the default
+    if (isShare && state.shareInfo?.viewMode) {
+      return state.shareInfo.viewMode;
+    }
+    // Priority 3: Use user's default viewMode
+    return state.user.viewMode || "normal";
+  },
+  sorting: () => {
+    return getters.displayPreference()?.sorting || state.user?.sorting || { by: "name", asc: true };
+  },
+  previewType: () => getTypeInfo(state.req.type).simpleType,
+  /** Audio/video preview uses folder listing nav links unless a multi-item playback queue is active. */
+  isPreviewPlaybackQueueNavMode: () => {
+    const previewType = getters.previewType();
+    const isMediaView = previewType === 'audio' || previewType === 'video';
+    const mode = state.playbackQueue?.mode || 'single';
+    const queueLength = state.playbackQueue?.queue?.length || 0;
+    return (
+      isMediaView &&
+      mode !== 'single' &&
+      mode !== 'loop-single' &&
+      queueLength > 1
+    );
+  },
+  playbackQueueCanGoPrevious: () => {
+    const queue = state.playbackQueue?.queue || [];
+    const currentIndex = state.playbackQueue?.currentIndex ?? -1;
+    const mode = state.playbackQueue?.mode || 'single';
+    if (queue.length <= 1 || currentIndex < 0) {
+      return false;
+    }
+    if (mode === 'sequential' && currentIndex === 0) {
+      return false;
+    }
+    return true;
+  },
+  playbackQueueCanGoNext: () => {
+    const queue = state.playbackQueue?.queue || [];
+    const currentIndex = state.playbackQueue?.currentIndex ?? -1;
+    const mode = state.playbackQueue?.mode || 'single';
+    if (queue.length <= 1 || currentIndex < 0) {
+      return false;
+    }
+    if (mode === 'sequential' && currentIndex >= queue.length - 1) {
+      return false;
+    }
+    return true;
+  },
+  isCardView: () =>
+    getters.viewMode() === 'gallery' ||
+    getters.viewMode() === 'normal' ||
+    getters.viewMode() === 'icons',
+  currentHash: () => state.shareInfo?.hash,
+  isMobile: () => state.isMobile,
+  isLoading: () => Object.keys(state.loading).length > 0,
+  isSettings: () => getters.currentView() === 'settings',
+  isDarkMode: () => {
+    if (state.shareInfo?.enforceDarkLightMode === "dark") {
+      return true
+    }
+    if (state.shareInfo?.enforceDarkLightMode === "light") {
+      return false
+    }
+    if (!getters.isShare() && getters.eventTheme() === "halloween") {
+      return true
+    }
+    if (state.user === null) {
+      return true
+    }
+    return state.user.darkMode === true
+  },
+  isLoggedIn: () => {
+    if (state.user === null) {
+      return false
+    }
+    if (state.user.locale === undefined || state.user.locale === null) {
+      let savedLocale = localStorage.getItem('userLocale')
+      if (!savedLocale) {
+        savedLocale = i18n.detectLocale()
+      }
+      mutations.updateCurrentUser({ locale: savedLocale })
+    }
+    if (globalVars.noAuth) {
+      return true
+    }
+    if (
+      state.user !== null &&
+      state.user?.username !== '' &&
+      state.user?.username !== 'anonymous'
+    ) {
+      return true
+    }
+    return false
+  },
+  isAdmin: () => state.user.permissions?.admin === true,
+  isFiles: () => state.route.path.startsWith('/files'),
+  isListing: () => getters.isFiles() || (getters.isShare() && state.req.type === 'directory'),
+  selectedCount: () =>
+    Array.isArray(state.selected) ? state.selected.length : 0,
+  getFirstSelected: () => typeof(state.selected[0]) === 'number' ? state.req.items[state.selected[0]] : state.selected[0],
+  isSingleFileSelected: () =>
+    getters.selectedCount() === 1 &&
+    getters.getFirstSelected()?.type !== 'directory',
+  selectedDownloadUrl () {
+    if (state.isSearchActive) {
+      return buildItemUrl(state.selected[0].source, state.selected[0].path)
+    }
+    return buildItemUrl(state.req.items[state.selected[0]].source, state.req.items[state.selected[0]].path)
+  },
+  reqNumDirs: () => {
+    let dirCount = 0
+    if (!state.req.items) {
+      return 0
+    }
+    state.req.items.forEach(item => {
+      // Check if the item is a directory
+      if (item.type === 'directory') {
+        // Otherwise, count this directory
+        dirCount++
+      }
+    })
+    // Return the directory count
+    return dirCount
+  },
+  reqNumFiles: () => {
+    let fileCount = 0
+    if (!state.req.items) {
+      return 0
+    }
+    state.req.items.forEach(item => {
+      // Check if the item is a directory
+      if (item.type !== 'directory') {
+        // Otherwise, count this directory
+        fileCount++
+      }
+    })
+    // Return the directory count
+    return fileCount
+  },
+  reqItems: () => {
+    if (state.user === null) return { pinned: [], dirs: [], files: [] };
+    const pinned = [];
+    const dirs = [];
+    const files = [];
+    if (!state.req.items) return { pinned, dirs, files };
+
+    for (const item of state.req.items) {
+      if (item.pinned) {
+        pinned.push(item);
+        continue;
+      }
+      if (item.type === 'directory') {
+        dirs.push(item);
+      } else {
+        item.Path = state.req.path;
+        files.push(item);
+      }
+    }
+    return { pinned, dirs, files };
+  },
+  isSidebarVisible: () => {
+    if (globalVars.disableSidebar || getters.isInvalidShare()) {
+      return false
+    }
+    const cv = getters.currentView()
+    if (cv === 'onlyOfficeEditor') {
+      return false
+    }
+    let visible = (state.showSidebar || getters.isStickySidebar())
+    if (getters.currentPromptName() && !getters.isStickySidebar()) {
+      visible = false
+    }
+    if (previewViews.includes(cv) && !getters.previewPerms().disableHideSidebar) {
+      visible = false
+    }
+    if (state.shareInfo?.singleFileShare) {
+      visible = state.showSidebar
+    }
+    return visible
+  },
+  sidebarWidth: () => state.sidebar.width,
+  sidebarMode: () => state.sidebar.mode,
+  isStickySidebar: () => {
+    let sticky = state.user?.stickySidebar
+    const currentView = getters.currentView()
+    if (currentView === 'settings') {
+      sticky = true
+    }
+    if (currentView === '' && !getters.isLoading()) {
+      sticky = true
+    }
+    if (getters.isMobile()) {
+      sticky = false
+    }
+    return sticky
+  },
+  showOverlay: () => {
+    const hasPrompt =
+      getters.currentPrompt() !== null && getters.currentPromptName() !== 'more'
+    const showForSidebar =
+      getters.isSidebarVisible() && !getters.isStickySidebar()
+    return hasPrompt || showForSidebar || state.isSearchActive
+  },
+  showBreadCrumbs: () => {
+    return getters.currentView() === 'listingView'
+  },
+  routePath: (trimModifier = '') => {
+    return removePrefix(state.route.path, trimModifier)
+  },
+  shareHash: () => {
+    if (!state.route.path.startsWith('/public/share')) {
+      return ""
+    }
+    const urlPath = getters.routePath('/public/share')
+    const urlPathParts = urlPath.split('/')
+    if (urlPathParts.length < 1) {
+      return ""
+    }
+    return urlPathParts[1]
+  },
+  sharePathBase: () => {
+    return `/public/share/${getters.shareHash()}/`
+  },
+  getSharePath: (subPath = "") => {
+    if (!state.route.path.startsWith('/public/share')) {
+      return ""
+    }
+    let urlPath = getters.routePath('/public/share')
+    if (urlPath === "/" || urlPath === "") {
+      return "";
+    }
+    // remove hash from path and decode each part
+    const parts = urlPath.split('/').slice(2);
+    urlPath = parts.map(part => decodeURIComponent(part)).join('/')
+    if (subPath !== "") {
+      urlPath = url.joinPath(urlPath, removeLeadingSlash(subPath))
+    }
+    return urlPath
+  },
+  isShare: () => {
+    return getters.shareHash() !== ""
+  },
+  currentView: () => {
+    if (state.navigation.isTransitioning) return 'loading';
+    const pathname = getters.routePath();
+    if (!state.user || state.user?.username === "") return 'login';
+    if (pathname.startsWith(`/settings`)) return 'settings';
+    if (pathname.startsWith(`/tools`)) return 'tools';
+
+    if (state.req.type !== undefined) {
+      const ext = `.${state.req.name.split(".").pop().toLowerCase()}`;
+      if (state.user.disableViewingExt?.includes(ext)) return 'preview';
+      if (state.req.type === 'directory') return 'listingView';
+      if (state.req.onlyOfficeId && !getters.officeViewingDisabled(state.req.name)) return 'onlyOfficeEditor';
+      if (getTypeInfo(state.req.type).simpleType === '3d-model') return 'threeJsViewer';
+
+      if ('content' in state.req && state.req.type === 'text/markdown') {
+        const hash = window.location.hash;
+        const preferEditor = state.user.preferEditorForMarkdown;
+
+        if (hash === '#edit') return 'editor';
+        if (hash === '#preview') return 'markdownViewer';
+        if (preferEditor) return 'editor';
+        return 'markdownViewer';
+      }
+
+      if ('content' in state.req) return 'editor';
+      if (state.req.type.startsWith('application/epub')) return 'epubViewer';
+      if (state.req.type.startsWith('application/vnd.openxmlformats-officedocument.wordprocessingml.document')) return 'docViewer';
+      return 'preview';
+    }
+    return 'listingView';
+  },
+  progress: () => {
+    // Check if state.upload is defined and valid
+    if (
+      !state.upload ||
+      !Array.isArray(state.upload.progress) ||
+      !Array.isArray(state.upload.sizes)
+    ) {
+      return 0
+    }
+
+    // Handle cases where progress or sizes arrays might be empty
+    if (state.upload.progress.length === 0 || state.upload.sizes.length === 0) {
+      return 0
+    }
+
+    // Calculate totalSize
+    const totalSize = state.upload.sizes.reduce((a, b) => a + b, 0)
+
+    // Calculate sum of progress
+    const sum = state.upload.progress.reduce((acc, val) => acc + val, 0)
+
+    // Return progress as a percentage
+    return Math.ceil((sum / totalSize) * 100)
+  },
+  filesInUploadCount: () => {
+    const uploadsCount = state.upload.length
+    const queueCount = state.queue.length
+    return uploadsCount + queueCount
+  },
+  currentPrompt: () => {
+    // Ensure state.prompts is an array
+    if (!Array.isArray(state.prompts)) {
+      return null
+    }
+    if (state.prompts.length === 0) {
+      return null
+    }
+    return state.prompts[state.prompts.length - 1]
+  },
+  currentPromptName: () => {
+    // Ensure state.prompts is an array
+    if (!Array.isArray(state.prompts) || state.prompts.length === 0) {
+      return ""
+    }
+    // Check if the name property is a string
+    const lastPrompt = state.prompts[state.prompts.length - 1]
+    if (typeof lastPrompt?.name !== 'string') {
+      return ""
+    }
+    return lastPrompt.name
+  },
+  isUploading: () => state.upload.isUploading,
+  filesInUpload: () => {
+    // Ensure state.upload.uploads is an object and state.upload.sizes is an array
+    if (
+      typeof state.upload.uploads !== 'object' ||
+      !Array.isArray(state.upload.sizes)
+    ) {
+      return []
+    }
+
+    const files = []
+
+    for (const index of Object.keys(state.upload.uploads)) {
+      const upload = getObjectProperty(state.upload.uploads, index)
+      if (!upload) continue
+      const id = upload.id
+      const type = upload.type
+      const name = upload.file.name
+      const size = getObjectProperty(state.upload.sizes, id) ?? 0 // Default to 0 if size is undefined
+      const isDir = upload.file.type === 'directory'
+      const progress = isDir
+        ? 100
+        : Math.ceil((state.upload.progress[id] || 0 / size) * 100) // Default to 0 if progress is undefined
+
+      files.push({
+        id,
+        name,
+        progress,
+        type,
+        isDir
+      })
+    }
+
+    return files.sort((a, b) => a.progress - b.progress)
+  },
+  fileViewingDisabled: filename => {
+    if (getters.isShare()) {
+      if (state.shareInfo?.disableFileViewer || state.shareInfo?.shareType === "upload" || state.shareInfo?.disableDownload) {
+        return true
+      }
+    } else {
+      if (!state.user.permissions.download) {
+        return true
+      }
+    }
+    const ext = ` ${getFileExtension(filename)}`;
+    if (state.user.disableViewingExt) {
+      const disabledExts = ` ${state.user.disableViewingExt.toLowerCase()}`;
+      if (disabledExts.includes(ext.toLowerCase())) {
+        return true
+      }
+    }
+    return false
+  },
+  officeViewingDisabled: filename => {
+    const ext = ` ${getFileExtension(filename)}`;
+    const disabledList = state.user.disableOnlyOfficeExt || ''
+    if (disabledList === '*') {
+      return true
+    }
+    if (disabledList !== '') {
+      const disabledExts = ` ${disabledList.toLowerCase()}`;
+      if (disabledExts.includes(ext.toLowerCase())) {
+        return true
+      }
+    }
+    return false
+  },
+  anonymous: () => {
+    return {
+      id: 0,
+      username: "anonymous",
+      locale: i18n.detectLocale(),
+      sorting: {
+        by: "name",
+        asc: true
+      },
+      viewMode: "normal",
+      singleClick: true,
+      quickDownload: false,
+      gallerySize: 5,
+      permissions: {
+        share: false,
+        modify: false,
+        api: false,
+        admin: false,
+        realtime: false
+      },
+      preview: {
+        video: true,
+        audio: true,
+        image: true,
+        popup: true,
+        models: true,
+        autoplayMedia: true,
+      },
+      disableSettings: true,
+      disableQuickToggles: false,
+      disableSearchOptions: false,
+      deleteWithoutConfirming: false,
+      deleteAfterArchive: true,
+      stickySidebar: true,
+      hideFilesInTree: false,
+      darkMode: true,
+      dateFormat: false,
+      disableViewingExt: "",
+      disableOfficePreviewExt: "",
+      disablePreviewExt: "",
+      preferEditorForMarkdown: false,
+      fileLoading: {
+        maxConcurrent: 1,
+        chunkSizeMb: 5,
+      }
+    }
+  },
+  multibuttonState: () => {
+    const cv = getters.currentView()
+    const isSidebarVisible = getters.isSidebarVisible()
+    if (isSidebarVisible) {
+      if (cv === "tools") {
+        if (state.user.stickySidebar) {
+          return "menu";
+        }
+        return "back";
+      }
+      if (cv === "settings") {
+        if (state.isMobile) {
+          return "back";
+        }
+        return "close";
+      }
+      if (state.isMobile) {
+        return "back";
+      }
+      if (cv === "listingView" || state.shareInfo?.singleFileShare) {
+        if (state.user.stickySidebar) {
+          return "menu";
+        }
+        return "back";
+      }
+      return "close";
+    }
+    if (cv === "tools") {
+      return "menu";
+    }
+    if (state.shareInfo?.singleFileShare) {
+      return "menu";
+    }
+    if (cv === "settings") {
+      if (state.isMobile) {
+        return "menu";
+      }
+    }
+    if (cv === "listingView") {
+      return "menu";
+    }
+    return "close";
+  },
+  isInvalidShare: () => {
+    return getters.shareHash() !== "" && state.shareInfo.hash === "" && globalVars.shareHash === "";
+  },
+  isValidShare: () => {
+    return getters.shareHash() !== "" && (state.shareInfo.hash !== "" || globalVars.shareHash !== "");
+  },
+  currentTool: () => {
+    if (getters.currentView() !== "tools") {
+      return null;
+    }
+    // Match by path instead of route name
+    const tool = tools().find(t => t.path === state.route.path);
+    // Return null when at /tools (list view) to avoid circular component rendering
+    return tool;
+  },
+  isEditorOrMarkdownView: () => {
+    return getters.currentView() === 'editor' || getters.currentView() === 'markdownViewer';
+  },
+  showStatusBar: () => {
+    if (getters.isShare() && state.shareInfo.shareType === "upload") {
+      return false;
+    }
+    const isAdvancedSearchRoute = (state.route?.path || "").startsWith("/tools/advancedSearch");
+    return getters.currentView() === "listingView" || getters.isEditorOrMarkdownView() || isAdvancedSearchRoute;
+  },
+  showGallerySizeSlider: () => {
+    const isAdvancedSearchRoute = (state.route?.path || "").startsWith("/tools/advancedSearch");
+    return getters.currentView() === "listingView" || isAdvancedSearchRoute;
+  },
+  permissions: () => {
+    if (getters.isShare()) {
+      return {
+        share: false,
+        modify: state.shareInfo?.allowModify,
+        create: state.shareInfo?.allowCreate,
+        delete: state.shareInfo?.allowDelete,
+        download: !state.shareInfo?.disableDownload,
+        admin: false,
+        api: false,
+        realtime: false,
+        archive: false,
+      };
+    }
+    return {
+      share:
+        !!(state.user?.permissions?.share || state.user?.permissions?.admin),
+      modify: state.user?.permissions?.modify,
+      create: state.user?.permissions?.create,
+      delete: state.user?.permissions?.delete,
+      download: state.user?.permissions?.download,
+      admin: state.user?.permissions?.admin,
+      api: state.user?.permissions?.api,
+      archive: state.user?.permissions?.archive,
+    };
+  },
+  previewPerms: () => {
+    if (getters.isShare()) {
+      // For shares, use defaults for preview settings (shares don't have per-share preview config)
+      return {
+        audio: state.user?.preview?.audio ?? true,
+        video: state.user?.preview?.video ?? true,
+        image: state.user?.preview?.image ?? true,
+        office: state.user?.preview?.office ?? true,
+        folder: state.user?.preview?.folder ?? true,
+        popup: state.user?.preview?.popup ?? true,
+        models: state.user?.preview?.models ?? true,
+        motionVideoPreview: state.user?.preview?.motionVideoPreview ?? false,
+        disableHideSidebar: state.user?.preview?.disableHideSidebar ?? false,
+        autoplayMedia: state.user?.preview?.autoplayMedia ?? false,
+        defaultMediaPlayer: false,
+        showHidden: state.shareInfo?.showHidden !== undefined ? state.shareInfo.showHidden : false,
+      };
+    }
+    // For regular users, use their preview settings -- unless is share
+    return {
+      audio: state.user?.preview?.audio ?? true,
+      video: state.user?.preview?.video ?? true,
+      image: state.user?.preview?.image ?? true,
+      office: state.user?.preview?.office ?? true,
+      folder: state.user?.preview?.folder ?? true,
+      popup: state.user?.preview?.popup ?? true,
+      models: state.user?.preview?.models ?? true,
+      motionVideoPreview: state.user?.preview?.motionVideoPreview ?? false,
+      disableHideSidebar: state.user?.preview?.disableHideSidebar ?? false,
+      autoplayMedia: state.user?.preview?.autoplayMedia ?? false,
+      defaultMediaPlayer: state.user?.preview?.defaultMediaPlayer ?? false,
+      showHidden: false, // Backend handles this now, but kept for API compatibility
+    };
+  }
+};

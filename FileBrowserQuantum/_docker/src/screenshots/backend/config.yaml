@@ -1,0 +1,11 @@
+server:
+  port: 8080
+  baseURL:  "/files/"
+  logging:
+    - levels: "info|error|warning|debug"
+      apiFilter: 'disabled'
+  sources:
+    - path: "../frontend/tests/playwright-files"
+      name: "playwright"
+      config:
+        defaultEnabled: true

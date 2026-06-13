@@ -1,0 +1,1267 @@
+import { notify } from '@/notify'
+import { mutations, state } from '@/store'
+import { globalVars } from '@/utils/constants'
+import { downloadManager } from '@/utils/downloadManager'
+import { getApiPath, getPublicApiPath } from '@/utils/url.js'
+import { adjustedData, fetchURL } from './utils'
+
+export { fetchPreviewImage } from '@/utils/previewRequests'
+
+// Notify if errors occur
+export async function fetchFiles(source, path, content = false, metadata = false, skipExtendedAttrs = false) {
+  if (!source || source === undefined || source === null) {
+    throw new Error('no source provided')
+  }
+  try {
+    const apiPath = getApiPath('resources', {
+      path: path,
+      source: source,
+      ...(content && { content: 'true' }),
+      ...(metadata && { metadata: 'true' }),
+      ...(skipExtendedAttrs && { skipExtendedAttrs: 'true' })
+    })
+    const res = await fetchURL(apiPath)
+    const data = await res.json()
+    const adjusted = adjustedData(data)
+    return adjusted
+  } catch (err) {
+    notify.showError(err.message || 'Error fetching data')
+    throw err
+  }
+}
+
+export async function getItems(source, path, only = "") {
+  if (!source || source === undefined || source === null) {
+    throw new Error('no source provided')
+  }
+  try {
+    const apiPath = getApiPath('resources/items', {
+      path: path,
+      source: source,
+      ...(only && { only: only }),
+    })
+    const res = await fetchURL(apiPath)
+    const data = await res.json()
+    return data
+  } catch (err) {
+    notify.showError(err.message || 'Error fetching items')
+    throw err
+  }
+}
+
+/**
+ * Registers a graceful pause for the active chunked upload at this path.
+ * Call immediately before aborting the chunk XHR so the server keeps partial data.
+ */
+export async function signalUploadPause(source, path, shareHash = null) {
+  if (shareHash) {
+    const apiPath = getPublicApiPath('resources/pause', {
+      hash: shareHash,
+      path: path,
+    })
+    const headers = {}
+    const sharePassword = localStorage.getItem(`sharepass:${shareHash}`)
+    if (sharePassword) {
+      headers['X-SHARE-PASSWORD'] = sharePassword
+    }
+    await fetchURL(apiPath, { method: 'POST', headers })
+    return
+  }
+  if (!source || source === undefined || source === null) {
+    throw new Error('no source provided')
+  }
+  const apiPath = getApiPath('resources/pause', { path, source })
+  await fetchURL(apiPath, { method: 'POST' })
+}
+
+async function resourceAction(source, path, method, content) {
+  if (!source || source === undefined || source === null) {
+    throw new Error('no source provided')
+  }
+  try {
+    const apiPath = getApiPath('resources', { path, source })
+    const opts = { method }
+    if (content) {
+      opts.body = content
+    }
+
+    const response = await fetchURL(apiPath, opts)
+    if (!response.ok) {
+      const error = new Error(response.statusText);
+      // attempt to marshal json response
+      let data = null;
+      try {
+        data = await response.json()
+      } catch (_e) {
+        // ignore
+      }
+      if (data) {
+        error.message = data.message;
+      }
+      (/** @type {any} */ (error)).status = response.status;
+      throw error;
+    }
+    return response
+  } catch (err) {
+    notify.showError(err.message || 'Error performing resource action')
+    throw err
+  }
+}
+
+export async function bulkDelete(items) {
+  if (!items || !Array.isArray(items) || items.length === 0) {
+    throw new Error('items array is required and must not be empty')
+  }
+  try {
+    const apiPath = getApiPath('resources/bulk')
+    const response = await fetchURL(apiPath, {
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(items),
+    })
+    const data = await response.json()
+    // 200 = all succeeded, 207 = partial success (some succeeded, some failed)
+    // Both are valid responses that should be returned, not thrown as errors
+    if (response.status === 200 || response.status === 207) {
+      return data
+    }
+    // For other error status codes, throw an error
+    const error = new Error(data.message || response.statusText)
+    error.status = response.status
+    throw error
+  } catch (err) {
+    // Only show notification and re-throw if it's a real error (not 200/207)
+    if (err.status && err.status !== 200 && err.status !== 207) {
+      notify.showError(err.message || 'Error performing bulk delete')
+    }
+    throw err
+  }
+}
+
+export async function put(source, path, content = '') {
+  if (!source) {
+    throw new Error('no source provided')
+  }
+  // resourceAction already handles error notification, just propagate
+  return await resourceAction(source, path, 'PUT', content)
+}
+
+export async function download(format, files, shareHash = "") {
+  const downloadChunkSizeMb = state.user?.fileLoading?.downloadChunkSizeMb || 0
+  const sizeThreshold = downloadChunkSizeMb * 1024 * 1024
+
+  const isMultiItemArchive =
+    files.length > 1 || (files.length === 1 && files[0].isDir)
+
+  const useChunkedArchive =
+    downloadChunkSizeMb > 0 && isMultiItemArchive
+
+  const useChunkedDownload =
+    downloadChunkSizeMb > 0 &&
+    files.length === 1 &&
+    !files[0].isDir &&
+    files[0].size &&
+    files[0].size >= sizeThreshold
+
+  if (useChunkedDownload) {
+    return await downloadChunked(files[0], shareHash)
+  }
+
+  if (format !== 'zip') {
+    format = 'tar.gz'
+  }
+
+  let source = null
+  let filePaths = []
+
+  if (shareHash) {
+    filePaths = files.map((file) => file.path)
+  } else {
+    for (const file of files) {
+      if (!file.source) {
+        throw new Error('File source is required for downloads')
+      }
+      if (source === null) {
+        source = file.source
+      } else if (source !== file.source) {
+        throw new Error('All files must be from the same source for downloads')
+      }
+      filePaths.push(file.path)
+    }
+  }
+
+  const params = {
+    file: filePaths,
+    algo: format,
+    ...(shareHash && { hash: shareHash }),
+    ...(!shareHash && source && { source: source }),
+    ...(state.shareInfo.token && { token: state.shareInfo.token }),
+    sessionId: state.sessionId,
+  }
+
+  const apiPath = getApiPath("resources/download", params, false, shareHash !== "")
+  const url = window.origin + apiPath
+
+  if (useChunkedArchive) {
+    return await downloadChunkedArchive(url, format, files, filePaths, source, shareHash)
+  }
+
+  const link = document.createElement('a')
+  link.href = url
+  link.style.display = 'none'
+  document.body.appendChild(link)
+  link.click()
+
+  setTimeout(() => {
+    document.body.removeChild(link)
+  }, 100)
+}
+
+/** Best-effort text from a failed download response (consumes body). */
+async function readDownloadErrorBody(response) {
+  try {
+    const text = await response.text()
+    if (text && text.length > 0) {
+      return text.length > 300 ? `${text.slice(0, 300)}…` : text
+    }
+  } catch {
+    // ignore
+  }
+  return ''
+}
+
+/** Parse total size from Content-Range: bytes 0-0/12345 */
+function totalFromContentRange(headerVal) {
+  if (!headerVal || typeof headerVal !== 'string') return 0
+  const idx = headerVal.lastIndexOf('/')
+  if (idx === -1) return 0
+  const n = parseInt(headerVal.slice(idx + 1), 10)
+  return Number.isFinite(n) ? n : 0
+}
+
+function appendArchiveTokenToUrl(url, token) {
+  if (!token) return url
+  const sep = url.includes('?') ? '&' : '?'
+  return `${url}${sep}archiveToken=${encodeURIComponent(token)}`
+}
+
+/** @returns {Promise<{ size: number, token: string | null }>} */
+async function resolveDownloadContentLength(url) {
+  let token = null
+  let res = await fetch(url, { method: 'HEAD', credentials: 'same-origin' })
+  if (res.ok) {
+    token = res.headers.get('X-Archive-Token')
+    const cl = res.headers.get('Content-Length')
+    if (cl) {
+      const n = parseInt(cl, 10)
+      if (Number.isFinite(n) && n > 0) {
+        return { size: n, token }
+      }
+    }
+  }
+  res = await fetch(url, {
+    method: 'GET',
+    headers: { Range: 'bytes=0-0' },
+    credentials: 'same-origin',
+  })
+  const cancelBody = () => {
+    if (res.body && typeof res.body.cancel === 'function') {
+      res.body.cancel().catch(() => {})
+    }
+  }
+  try {
+    token = res.headers.get('X-Archive-Token') || token
+    if (res.status === 206) {
+      const total = totalFromContentRange(res.headers.get('Content-Range'))
+      if (total > 0) {
+        cancelBody()
+        return { size: total, token }
+      }
+    }
+    if (res.ok) {
+      const cl = res.headers.get('Content-Length')
+      if (cl) {
+        const n = parseInt(cl, 10)
+        if (Number.isFinite(n) && n > 0) {
+          cancelBody()
+          return { size: n, token }
+        }
+      }
+    }
+    cancelBody()
+    return { size: 0, token }
+  } catch (e) {
+    cancelBody()
+    throw e
+  }
+}
+
+function archiveDisplayFileName(format, files) {
+  const ext = format === 'zip' ? '.zip' : '.tar.gz'
+  const first = files[0]
+  if (files.length === 1 && first.isDir) {
+    const base =
+      first.name ||
+      (first.path?.split('/').filter(Boolean).pop()) ||
+      'download'
+    return `${base}${ext}`
+  }
+  if (first?.path) {
+    const parts = first.path.split('/').filter(Boolean)
+    if (parts.length >= 2) {
+      return `${parts[parts.length - 2]}${ext}`
+    }
+    if (parts.length === 1) {
+      return `${parts[0]}${ext}`
+    }
+  }
+  return `download${ext}`
+}
+
+/**
+ * Range-based fetch; updates downloadManager progress for downloadId.
+ * @returns {Promise<Blob|null>}
+ */
+async function chunkedRangeDownloadToBlob(
+  baseUrl,
+  fileSize,
+  chunkSize,
+  downloadId,
+  abortController
+) {
+  const chunks = []
+  let offset = 0
+  let loaded = 0
+  if (!Number.isFinite(fileSize) || fileSize <= 0) {
+    throw new Error('Invalid file size for chunked download')
+  }
+  /** May be corrected from Content-Range when the listing size disagrees with the file on disk. */
+  let totalSize = fileSize
+
+  while (offset < totalSize) {
+    const download = downloadManager.findById(downloadId)
+    if (download?.status === 'cancelled') {
+      return null
+    }
+
+    const end = Math.min(offset + chunkSize - 1, totalSize - 1)
+    const rangeHeader = `bytes=${offset}-${end}`
+
+    const response = await fetch(baseUrl, {
+      headers: {
+        Range: rangeHeader,
+      },
+      credentials: 'same-origin',
+      signal: abortController.signal,
+    })
+
+    if (!response.ok && response.status !== 206) {
+      const body = (await readDownloadErrorBody(response)).trim()
+      const fromHttp =
+        body ||
+        [response.statusText, `HTTP ${response.status}`].filter(Boolean).join(' ').trim()
+      throw new Error(fromHttp || 'Request failed')
+    }
+
+    if (!response.body) {
+      throw new Error(
+        [response.statusText, `HTTP ${response.status}`].filter(Boolean).join(' ').trim() ||
+          'No response body'
+      )
+    }
+
+    if (response.status === 206) {
+      const fromCr = totalFromContentRange(response.headers.get('Content-Range'))
+      if (fromCr > 0) {
+        totalSize = fromCr
+        const dl = downloadManager.findById(downloadId)
+        if (dl) {
+          dl.size = fromCr
+        }
+      }
+    } else if (response.status === 200) {
+      const clFull = response.headers.get('Content-Length')
+      if (clFull) {
+        const n = parseInt(clFull, 10)
+        if (Number.isFinite(n) && n > 0) {
+          totalSize = n
+          const dl = downloadManager.findById(downloadId)
+          if (dl) {
+            dl.size = n
+          }
+        }
+      }
+    }
+
+    const cl = response.headers.get('Content-Length')
+    let expectedChunkSize = end - offset + 1
+    if (cl) {
+      const n = parseInt(cl, 10)
+      if (Number.isFinite(n) && n > 0) {
+        expectedChunkSize = n
+      }
+    }
+
+    const reader = response.body.getReader()
+    const chunkParts = []
+    let chunkLoaded = 0
+    let lastProgressUpdate = 0
+    const progressUpdateInterval = Math.max(50000, expectedChunkSize / 50)
+
+    try {
+      let reading = true
+      while (reading) {
+        const { done, value } = await reader.read()
+        if (done) {
+          reading = false
+          break
+        }
+
+        chunkParts.push(value)
+        chunkLoaded += value.length
+
+        const chunkProgress = Math.min(chunkLoaded, expectedChunkSize)
+        const totalLoaded = offset + chunkProgress
+
+        if (
+          chunkLoaded - lastProgressUpdate >= progressUpdateInterval ||
+          chunkLoaded >= expectedChunkSize
+        ) {
+          downloadManager.updateProgress(downloadId, totalLoaded, totalSize)
+          lastProgressUpdate = chunkLoaded
+        }
+      }
+    } catch (readError) {
+      const download = downloadManager.findById(downloadId)
+      if (readError.name === 'AbortError' || (download?.status === 'cancelled')) {
+        downloadManager.setStatus(downloadId, 'cancelled')
+        return null
+      }
+      throw readError
+    }
+
+    if (chunkLoaded < expectedChunkSize) {
+      throw new Error('Connection closed before the full chunk was received')
+    }
+
+    const chunk = new Uint8Array(chunkLoaded)
+    let position = 0
+    for (const part of chunkParts) {
+      chunk.set(part, position)
+      position += part.length
+    }
+
+    const chunkToUse =
+      chunk.byteLength > expectedChunkSize
+        ? chunk.slice(0, expectedChunkSize).buffer
+        : chunk.buffer
+
+    chunks.push(chunkToUse)
+    loaded += expectedChunkSize
+    downloadManager.updateProgress(downloadId, loaded, totalSize)
+    offset += expectedChunkSize
+  }
+
+  return new Blob(chunks, { type: 'application/octet-stream' })
+}
+
+async function downloadChunkedArchive(url, format, files, filePaths, source, shareHash) {
+  const downloadChunkSizeMb = state.user?.fileLoading?.downloadChunkSizeMb || 0
+  if (downloadChunkSizeMb === 0) {
+    throw new Error('Chunked download is disabled (chunk size is 0)')
+  }
+  const chunkSize = downloadChunkSizeMb * 1024 * 1024
+  const fileName = archiveDisplayFileName(format, files)
+  const { size: fileSize, token } = await resolveDownloadContentLength(url)
+  if (!fileSize || fileSize <= 0) {
+    throw new Error('Could not determine archive size for chunked download')
+  }
+
+  const baseUrl = appendArchiveTokenToUrl(url, token)
+
+  const stub = {
+    name: fileName,
+    path: filePaths[0],
+    source: source || '',
+    size: fileSize,
+    isDir: false,
+  }
+  const downloadId = downloadManager.add(stub, shareHash)
+  const dl = downloadManager.findById(downloadId)
+  if (dl) {
+    dl.archiveFormat = format
+    dl.archiveFiles = files
+  }
+
+  downloadManager.setStatus(downloadId, 'downloading')
+
+  const hasDownloadPrompt = state.prompts?.some((h) => h.name === 'download')
+  if (!hasDownloadPrompt) {
+    mutations.showPrompt({ name: 'download' })
+  }
+
+  const abortController = new AbortController()
+  const dlm = downloadManager.findById(downloadId)
+  if (dlm) {
+    dlm.abortController = abortController
+  }
+
+  try {
+    const blob = await chunkedRangeDownloadToBlob(
+      baseUrl,
+      fileSize,
+      chunkSize,
+      downloadId,
+      abortController
+    )
+    if (!blob) {
+      return
+    }
+
+    const blobUrl = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = blobUrl
+    link.download = fileName
+    link.style.display = 'none'
+    document.body.appendChild(link)
+    link.click()
+
+    downloadManager.setStatus(downloadId, 'completed')
+    downloadManager.updateProgress(downloadId, fileSize, fileSize)
+
+    setTimeout(() => {
+      document.body.removeChild(link)
+      URL.revokeObjectURL(blobUrl)
+    }, 100)
+  } catch (error) {
+    const download = downloadManager.findById(downloadId)
+    if (error.name === 'AbortError' || (download?.status === 'cancelled')) {
+      downloadManager.setStatus(downloadId, 'cancelled')
+      return
+    }
+    const message =
+      error instanceof Error ? error.message || 'Unknown error' : String(error)
+    downloadManager.setError(downloadId, message)
+    throw error
+  }
+}
+
+async function downloadChunked(file, shareHash = "") {
+  const chunkSizeMb = state.user?.fileLoading?.downloadChunkSizeMb || 0
+
+  if (chunkSizeMb === 0) {
+    throw new Error("Chunked download is disabled (chunk size is 0)")
+  }
+  const chunkSize = chunkSizeMb * 1024 * 1024 // Convert MB to bytes
+
+  // Extract filename from path if name is not available
+  const fileName = file.name || (file.path ? file.path.split('/').pop() : 'download')
+
+  const params = {
+    file: file.path,
+    ...(shareHash && { hash: shareHash }),
+    ...(!shareHash && file.source && { source: file.source }),
+    ...(state.shareInfo.token && { token: state.shareInfo.token }),
+    sessionId: state.sessionId
+  }
+
+  const apiPath = getApiPath("resources/download", params, false, shareHash !== "")
+  const baseUrl = window.origin + apiPath
+
+  let fileSize = Number(file.size)
+  const { size: serverLen } = await resolveDownloadContentLength(baseUrl)
+  if (Number.isFinite(serverLen) && serverLen > 0) {
+    fileSize = serverLen
+  }
+  if (!Number.isFinite(fileSize) || fileSize <= 0) {
+    throw new Error('Could not determine file size for chunked download')
+  }
+
+  const queuedFile = { ...file, size: fileSize }
+  const downloadId = downloadManager.add(queuedFile, shareHash)
+
+  downloadManager.setStatus(downloadId, "downloading")
+
+  // Show download prompt if not already shown (it should already be shown by downloadFiles, but check to be safe)
+  const hasDownloadPrompt = state.prompts?.some(h => h.name === 'download');
+
+  if (!hasDownloadPrompt) {
+    mutations.showPrompt({ name: 'download' })
+  }
+
+  const download = downloadManager.findById(downloadId)
+  const abortController = new AbortController()
+  download.abortController = abortController
+
+  try {
+    const blob = await chunkedRangeDownloadToBlob(
+      baseUrl,
+      fileSize,
+      chunkSize,
+      downloadId,
+      abortController
+    )
+    if (!blob) {
+      return
+    }
+
+    const blobUrl = URL.createObjectURL(blob)
+
+    const link = document.createElement('a')
+    link.href = blobUrl
+    link.download = fileName
+    link.style.display = 'none'
+    document.body.appendChild(link)
+    link.click()
+
+    downloadManager.setStatus(downloadId, "completed")
+    const dlDone = downloadManager.findById(downloadId)
+    const finalSize = dlDone?.size ?? fileSize
+    downloadManager.updateProgress(downloadId, finalSize, finalSize)
+
+    setTimeout(() => {
+      document.body.removeChild(link)
+      URL.revokeObjectURL(blobUrl)
+    }, 100)
+  } catch (error) {
+    // Check if download was cancelled by user
+    const download = downloadManager.findById(downloadId);
+    if (error.name === 'AbortError' || (download?.status === "cancelled")) {
+      downloadManager.setStatus(downloadId, "cancelled")
+      // Don't throw error or show notification for user-initiated cancellation
+      return;
+    }
+    const message =
+      error instanceof Error ? error.message || "Unknown error" : String(error)
+    downloadManager.setError(downloadId, message)
+    throw error
+  }
+}
+
+export function post(
+  source,
+  path,
+  content = "",
+  overwrite = false,
+  onupload,
+  headers = {},
+  isDir = false
+) {
+  if (!source || source === undefined || source === null) {
+    throw new Error('no source provided')
+  }
+  try {
+    const apiPath = getApiPath("resources", {
+      path: path,
+      source: source,
+      override: overwrite,
+      ...(isDir && { isDir: 'true' })
+    });
+
+    const request = new XMLHttpRequest();
+    request.open("POST", apiPath, true);
+
+    for (const header in headers) {
+      request.setRequestHeader(header, headers[header]);
+    }
+
+    if (typeof onupload === "function") {
+      request.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          const percentComplete = Math.round(
+            (event.loaded / event.total) * 100
+          );
+          onupload(percentComplete); // Pass the percentage to the callback
+        }
+      };
+    }
+
+    const promise = new Promise((resolve, reject) => {
+      request.onload = () => {
+        if (request.status >= 200 && request.status < 300) {
+          resolve(request.responseText);
+        } else if (request.status === 409) {
+          const error = new Error("conflict");
+          error.response = { status: request.status, responseText: request.responseText };
+          reject(error);
+        } else {
+          let errorMessage = "Upload failed";
+          try {
+            const errorData = JSON.parse(request.responseText);
+            errorMessage = errorData.message || errorMessage;
+          } catch (_e) {
+            errorMessage = request.responseText || errorMessage;
+          }
+          const error = new Error(errorMessage);
+          error.status = request.status;
+          error.response = { status: request.status, responseText: request.responseText };
+          notify.showError(errorMessage);
+          reject(error);
+        }
+      };
+
+      request.onerror = () => reject(new Error("Network error"));
+      request.onabort = () => reject(new Error("Upload aborted"));
+
+      if (
+        content instanceof Blob &&
+        !["http:", "https:"].includes(window.location.protocol)
+      ) {
+        new Response(content).arrayBuffer()
+          .then(buffer => request.send(buffer))
+          .catch(err => reject(err));
+      } else {
+        request.send(content);
+      }
+    });
+
+    promise.xhr = request;
+    return promise;
+  } catch (err) {
+    notify.showError(err.message || "Error posting resource");
+    // We are returning a promise, so we should return a rejected promise on error.
+    return Promise.reject(err);
+  }
+}
+
+export async function moveCopy(
+  items,
+  action = 'copy',
+  overwrite = false,
+  rename = false
+) {
+  if (!items || !Array.isArray(items) || items.length === 0) {
+    throw new Error('items array is required and must not be empty')
+  }
+
+  try {
+    // Build request body with proper format
+    const requestBody = {
+      items: items.map(item => ({
+        fromSource: item.fromSource,
+        fromPath: item.from,
+        toSource: item.toSource,
+        toPath: item.to
+      })),
+      action: action,
+      overwrite: overwrite,
+      rename: rename
+    }
+
+    const apiPath = getApiPath('resources')
+    // We use fetch directly here instead of fetchURL because fetchURL throws on non-2xx status,
+    // consuming the response body as text. We need to parse the JSON response for 500/207 errors.
+    // We need to manually add headers that fetchURL adds.
+    const headers = {
+      'Content-Type': 'application/json',
+      'sessionId': state.sessionId
+    }
+
+    const response = await fetch(apiPath, {
+      method: 'PATCH',
+      headers: headers,
+      body: JSON.stringify(requestBody),
+      credentials: 'same-origin'
+    })
+
+    const data = await response.json()
+
+    // 200 = all succeeded, 207 = partial success (some succeeded, some failed)
+    if (response.status === 200 || response.status === 207) {
+      return data
+    }
+
+    // For other error status codes (like 500), preserve the response data
+    const error = new Error(data.message || response.statusText)
+    error.status = response.status
+    // Attach the response data so the caller can access failed items
+    if (data.failed) {
+      error.failed = data.failed
+    }
+    if (data.succeeded) {
+      error.succeeded = data.succeeded
+    }
+    throw error
+  } catch (err) {
+    // For 500 errors with response data, don't show notification here
+    // Let the caller handle it with the attached error data
+    // Only show notification for unexpected errors (no status or not 500)
+    if (!err.status || (err.status !== 500 && err.status !== 200 && err.status !== 207)) {
+      notify.showError(err.message || 'Error moving/copying resources')
+    }
+    throw err
+  }
+}
+
+export async function checksum(source, path, algo) {
+  if (!source || source === undefined || source === null) {
+    throw new Error('no source provided')
+  }
+  try {
+    const params = {
+      path: path,
+      source: source,
+      checksum: algo
+    }
+    const apiPath = getApiPath('resources', params)
+    const res = await fetchURL(apiPath)
+    const data = await res.json()
+    return data.checksums[algo]
+  } catch (err) {
+    notify.showError(err.message || 'Error fetching checksum')
+    throw err
+  }
+}
+
+export function getDownloadURL(source, path, inline, useExternal) {
+  if (!source || source === undefined || source === null) {
+    throw new Error('no source provided')
+  }
+  try {
+    const params = {
+      source: source,
+      file: path,
+      ...(inline && { inline: 'true' })
+    }
+    const apiPath = getApiPath('resources/download', params)
+    if (globalVars.externalUrl && useExternal) {
+      return globalVars.externalUrl + apiPath
+    }
+    return window.origin + apiPath
+  } catch (err) {
+    notify.showError(err.message || 'Error getting download URL')
+    throw err
+  }
+}
+
+/**
+ * Build a preview API URL. Use fetchPreviewImage(url, signal) to load it;
+ * pass an AbortSignal so the caller can cancel on navigation or unmount.
+ */
+export function getPreviewURL(source, path, modified) {
+  if (!source || source === undefined || source === null) {
+    throw new Error('no source provided')
+  }
+  try {
+    const params = {
+      path: path,
+      key: Date.parse(modified), // Use modified date as cache key
+      source: source,
+      inline: 'true'
+    }
+    const apiPath = getApiPath('resources/preview', params)
+    return window.origin + apiPath
+  } catch (err) {
+    notify.showError(err.message || 'Error getting preview URL')
+    throw err
+  }
+}
+
+// POST /api/resources/archive - Create an archive
+export async function createArchive(opts) {
+  const { fromSource, toSource, paths, destination, format, compression, deleteAfter } = opts;
+  if (!fromSource || !paths?.length || !destination) {
+    throw new Error("fromSource, paths, and destination are required");
+  }
+  const body = {
+    fromSource,
+    paths,
+    destination,
+    ...(toSource && toSource !== fromSource && { toSource }),
+    ...(format && { format }),
+    ...(compression !== undefined && compression !== null && { compression }),
+    ...(deleteAfter && { deleteAfter: true }),
+  };
+  try {
+    const apiPath = getApiPath("resources/archive");
+    const response = await fetchURL(apiPath, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return response.json();
+  } catch (err) {
+    notify.showError(err.message || "Error creating archive");
+    throw err;
+  }
+}
+
+// POST /api/resources/unarchive - Extract an archive
+export async function unarchive(opts) {
+  const { fromSource, toSource, path, destination, deleteAfter } = opts;
+  if (!fromSource || !path || !destination) {
+    throw new Error("fromSource, path, and destination are required");
+  }
+  const body = {
+    fromSource,
+    ...(toSource && toSource !== fromSource && { toSource }),
+    path,
+    destination,
+    ...(deleteAfter && { deleteAfter: true }),
+  };
+  try {
+    const apiPath = getApiPath("resources/unarchive");
+    const response = await fetchURL(apiPath, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return response.json();
+  } catch (err) {
+    notify.showError(err.message || "Error extracting archive");
+    throw err;
+  }
+}
+
+// ============================================================================
+// PUBLIC API ENDPOINTS (hash-based authentication)
+// ============================================================================
+
+// Fetch public share data
+/**
+ * @param {string} path
+ * @param {string} hash
+ * @param {string} password
+ * @param {boolean} content
+ * @param {boolean} metadata
+ * @returns {Promise<any>}
+ */
+export async function fetchFilesPublic(path, hash, password = "", content = false, metadata = false, skipExtendedAttrs = false) {
+  const params = {
+    path: path,
+    hash,
+    ...(skipExtendedAttrs && { skipExtendedAttrs: 'true' }),
+    ...(content && { content: 'true' }),
+    ...(metadata && { metadata: 'true' }),
+    ...(state.shareInfo.token && { token: state.shareInfo.token })
+  }
+  const apiPath = getPublicApiPath("resources", params);
+  const response = await fetch(apiPath, {
+    headers: {
+      "X-SHARE-PASSWORD": password || "",
+    },
+  });
+
+  if (!response.ok) {
+    const error = new Error(response.statusText);
+    let data = null;
+    try {
+      data = await response.json()
+    } catch (_e) {
+      // ignore
+    }
+    if (data) {
+      error.message = data.message;
+    }
+    (/** @type {any} */ (error)).status = response.status;
+    throw error;
+  }
+  const data = await response.json()
+  const adjusted = adjustedData(data);
+  return adjusted
+}
+
+export async function getItemsPublic(hash, path, only = "") {
+  if (!hash || hash === undefined || hash === null) {
+    throw new Error('no hash provided')
+  }
+  try {
+    const apiPath = getPublicApiPath('resources/items', {
+      path: path,
+      hash: hash,
+      ...(only && { only: only }),
+      ...(state.shareInfo.token && { token: state.shareInfo.token })
+    })
+    const response = await fetch(apiPath)
+    const data = await response.json()
+    return data
+  } catch (err) {
+    notify.showError(err.message || 'Error fetching items')
+    throw err
+  }
+}
+
+// Generate a download URL
+/**
+ * @param {{ path: string; hash: string; token: string; inline?: boolean }} share
+ * @param {string[]} files - Array of file paths (will be converted to repeated 'file' parameters)
+ * @returns {string}
+ */
+export function getDownloadURLPublic(share, files, inline=false) {
+  const fileArray = Array.isArray(files) ? files : [files]
+  const params = {
+    file: fileArray, // Array will be converted to repeated 'file' params by getPublicApiPath
+    hash: share.hash,
+    token: share.token,
+    ...(inline && { inline: 'true' })
+  }
+  const apiPath = getPublicApiPath("resources/download", params)
+  return window.origin + apiPath
+}
+
+// Generate a preview URL for public shares
+/**
+ * @param {string} path
+ * @param {string} size - The size parameter (small, large, original). Omit for default (small).
+ * @returns {string}
+ */
+export function getPreviewURLPublic(path, size) {
+  try {
+    const params = {
+      path: path,
+      hash: state.shareInfo.hash,
+      inline: 'true',
+      ...(size && size !== 'small' && { size: size }),
+      ...(state.shareInfo.token && { token: state.shareInfo.token })
+    }
+    const apiPath = getPublicApiPath('resources/preview', params)
+    return window.origin + apiPath
+  } catch (/** @type {any} */ err) {
+    notify.showError(err.message || 'Error getting preview URL')
+    throw err
+  }
+}
+
+export function postPublic(
+  hash,
+  path,
+  content = "",
+  overwrite = false,
+  onupload,
+  headers = {},
+  isDir = false
+) {
+  if (!hash || hash === undefined || hash === null) {
+    throw new Error('no hash provided')
+  }
+  const sharePassword = localStorage.getItem(`sharepass:${hash}`);
+  if (sharePassword) {
+    headers["X-SHARE-PASSWORD"] = sharePassword;
+  }
+  try {
+    const apiPath = getPublicApiPath("resources", {
+      path: path,
+      hash: hash,
+      override: overwrite,
+      ...(isDir && { isDir: 'true' })
+    });
+
+    const request = new XMLHttpRequest();
+    request.open("POST", apiPath, true);
+
+    for (const header in headers) {
+      request.setRequestHeader(header, headers[header]);
+    }
+    if (typeof onupload === "function") {
+      request.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          const percentComplete = Math.round(
+            (event.loaded / event.total) * 100
+          );
+          onupload(percentComplete);
+        }
+      };
+    }
+
+    const promise = new Promise((resolve, reject) => {
+      request.onload = () => {
+        if (request.status >= 200 && request.status < 300) {
+          resolve(request.responseText);
+        } else if (request.status === 409) {
+          const error = new Error("conflict");
+          error.response = { status: request.status, responseText: request.responseText };
+          reject(error);
+        } else {
+          let errorMessage = "Upload failed";
+          try {
+            const errorData = JSON.parse(request.responseText);
+            errorMessage = errorData.message || errorMessage;
+          } catch (_e) {
+            errorMessage = request.responseText || errorMessage;
+          }
+
+          const error = new Error(errorMessage);
+          error.status = request.status;
+          notify.showError(errorMessage);
+          reject(error);
+        }
+      };
+
+      request.onerror = () => {
+        const error = new Error("Network error");
+        notify.showError("Network error during upload");
+        reject(error);
+      };
+
+      request.onabort = () => {
+        const error = new Error("Upload aborted");
+        notify.showError("Upload was aborted");
+        reject(error);
+      };
+
+      if (
+        content instanceof Blob &&
+        !["http:", "https:"].includes(window.location.protocol)
+      ) {
+        new Response(content).arrayBuffer()
+          .then(buffer => request.send(buffer))
+          .catch(err => reject(err));
+      } else {
+        request.send(content);
+      }
+    });
+
+    promise.xhr = request;
+    return promise;
+  } catch (err) {
+    notify.showError(err.message || "Error posting resource");
+    return Promise.reject(err);
+  }
+}
+
+async function resourceActionPublic(hash, path, method, content, token = "") {
+  try {
+    const headers = {};
+    const sharePassword = localStorage.getItem(`sharepass:${hash}`);
+    if (sharePassword) {
+      headers["X-SHARE-PASSWORD"] = sharePassword;
+    }
+    const apiPath = getPublicApiPath('resources', { path, hash: hash, token: token })
+    const response = await fetch(apiPath, {
+      method,
+      body: content,
+      headers,
+    });
+    if (!response.ok) {
+      const error = new Error(response.statusText);
+      let data = null;
+      try {
+        data = await response.json()
+      } catch (_e) {
+        // ignore
+      }
+      if (data) {
+        error.message = data.message;
+      }
+      (/** @type {any} */ (error)).status = response.status;
+      throw error;
+    }
+    return response;
+  } catch (err) {
+    notify.showError(err.message || 'Error performing resource action')
+    throw err
+  }
+}
+
+export async function putPublic(hash, path, content = '') {
+  return await resourceActionPublic(hash, path, 'PUT', content)
+}
+
+export async function bulkDeletePublic(items) {
+  if (!items || !Array.isArray(items) || items.length === 0) {
+    throw new Error('items array is required and must not be empty')
+  }
+
+  const hash = state.shareInfo?.hash;
+  if (!hash) {
+    throw new Error('share hash is required')
+  }
+
+  const params = {
+    hash: hash,
+    ...(state.shareInfo.token && { token: state.shareInfo.token }),
+    sessionId: state.sessionId
+  }
+  const apiPath = getPublicApiPath("resources/bulk", params)
+  const baseUrl = window.origin + apiPath
+
+  try {
+    const response = await fetch(baseUrl, {
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      credentials: 'same-origin',
+      body: JSON.stringify(items),
+    })
+
+    const data = await response.json()
+
+    if (response.status === 200 || response.status === 207) {
+      return data
+    }
+
+    const error = new Error(data.message || response.statusText)
+    error.status = response.status
+    throw error
+  } catch (err) {
+    if (err.status && err.status !== 200 && err.status !== 207) {
+      return {
+        succeeded: [],
+        failed: items.map(item => ({
+          source: item.source || '',
+          path: item.path,
+          message: err.message || 'Delete failed',
+        })),
+      }
+    }
+    throw err
+  }
+}
+
+export async function moveCopyPublic(
+  hash,
+  items,
+  action = 'copy',
+  overwrite = false,
+  rename = false
+) {
+  if (!items || !Array.isArray(items) || items.length === 0) {
+    throw new Error('items array is required and must not be empty')
+  }
+
+  try {
+    const requestBody = {
+      items: items.map(item => ({
+        fromPath: item.from,
+        toPath: item.to
+      })),
+      action: action,
+      overwrite: overwrite,
+      rename: rename
+    }
+
+    const apiPath = getPublicApiPath('resources', { hash: hash })
+    const response = await fetch(apiPath, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(state.shareInfo.token && { 'X-Auth-Token': state.shareInfo.token })
+      },
+      body: JSON.stringify(requestBody),
+    })
+
+    const data = await response.json()
+
+    if (response.status === 200 || response.status === 207) {
+      return data
+    }
+
+    const error = new Error(data.message || response.statusText)
+    error.status = response.status
+    if (data.failed) {
+      error.failed = data.failed
+    }
+    if (data.succeeded) {
+      error.succeeded = data.succeeded
+    }
+    throw error
+  } catch (err) {
+    if (err.status && err.status !== 200 && err.status !== 207) {
+      console.error(err.message || 'Error moving/copying resources')
+    }
+    throw err
+  }
+}
