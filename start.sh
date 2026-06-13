@@ -10,8 +10,10 @@ export ANDROID_API_LEVEL=28
 pip install websockify
 
 cd ~/Termux-Nino-OS-WebUI/FileBrowserQuantum
-make
-make build
+npm cache clean --force 
+npm install
+npm run build
+
 cd ~/Termux-Nino-OS-WebUI/FileBrowserQuantum/backend
 ./filebrowser &
 
