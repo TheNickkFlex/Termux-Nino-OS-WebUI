@@ -17,6 +17,11 @@ cd ~/Termux-Nino-OS-WebUI/FileBrowserQuantum/frontend
 rm -rf node_modules package-lock.json
 npm install --no-bin-links
 
+# CHAMADA DIRETA AO VITE LOCAL (Resolve o "vite: not found")
+./node_modules/vite/bin/vite.js build --outDir ../backend/http/dist
+
+cp -r ../backend/http/dist/* ../backend/http/embed 2>/dev/null || true
+
 # Rodar o build sem o '&' para o script esperar ele terminar antes de seguir
 npx vite build --outDir ../backend/http/dist
 cp -r ../backend/http/dist/* ../backend/http/embed 2>/dev/null || true
