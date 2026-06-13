@@ -9,7 +9,7 @@ pip install cryptography
 export ANDROID_API_LEVEL=28
 pip install websockify
 
-cd ~/Nano-OS-Interface/FileBrowserQuantum/backend
+cd ~/Termux-Nino-OS-WebUI/FileBrowserQuantum/backend
 ./filebrowser &
 
 sleep 2
