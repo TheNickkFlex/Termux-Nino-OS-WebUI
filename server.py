@@ -13,17 +13,17 @@ from urllib.parse import urlparse
 PORT       = 4000
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ── Estrutura de diretórios do projeto ────────────────────────
+# ── Project directory structure ───────────────────────────────
 #
 #   nano-os/
 #   ├── server.py
 #   ├── index.html
-#   ├── icons/              ← ícones estáticos do painel
-#   ├── noVNC/              ← git clone do noVNC (websockify --web aponta aqui)
+#   ├── icons/              ← static panel icons
+#   ├── noVNC/              ← noVNC git clone (websockify --web points here)
 #   └── user-applications/
-#       ├── apps.json       ← registro dos apps
-#       ├── icons/          ← ícones salvos
-#       └── xstartups/      ← scripts bash montados por app
+#       ├── apps.json       ← app registry
+#       ├── icons/          ← saved icons
+#       └── xstartups/      ← bash scripts built per app
 #
 APPS_DIR      = os.path.join(SCRIPT_DIR, "user-applications")
 ICONS_DIR     = os.path.join(APPS_DIR,   "icons")
@@ -35,7 +35,7 @@ for _d in [APPS_DIR, ICONS_DIR, XSTARTUPS_DIR]:
     os.makedirs(_d, exist_ok=True)
 
 
-# ── Utilitário de shell ───────────────────────────────────────
+# ── Shell utility ─────────────────────────────────────────────
 
 def run_cmd(cmd):
     try:
@@ -45,7 +45,7 @@ def run_cmd(cmd):
         return None
 
 
-# ── Stats do sistema ──────────────────────────────────────────
+# ── System stats ──────────────────────────────────────────────
 
 def get_battery():
     out = run_cmd("termux-battery-status")
@@ -120,7 +120,7 @@ def get_system():
     }
 
 
-# ── Gerenciamento de apps ─────────────────────────────────────
+# ── App management ────────────────────────────────────────────
 
 def load_apps():
     try:
@@ -138,14 +138,14 @@ def _port_in_use(port):
         return s.connect_ex(("localhost", port)) == 0
 
 def find_free_display(start=1):
-    """Primeiro display VNC livre (:N → porta 5900+N)."""
+    """First free VNC display (:N → port 5900+N)."""
     for d in range(start, 30):
         if not _port_in_use(5900 + d):
             return d
     return None
 
 def find_free_ws_port(start=6081):
-    """Primeira porta livre para o websockify (começa em 6081, 6080 é o noVNC principal)."""
+    """First free port for websockify (starts at 6081, 6080 is the main noVNC port)."""
     for port in range(start, 6200):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -158,13 +158,13 @@ def find_free_ws_port(start=6081):
 
 def create_xstartup(app_id, commands):
     """
-    Monta o script bash de inicialização a partir dos comandos do usuário.
+    Builds the bash startup script from user-provided commands.
 
-    O usuário escreve o corpo do script (exports, WM, exec do app…).
-    Apenas o shebang é inserido automaticamente — tudo mais é do usuário,
-    o que garante alta compatibilidade sem arquivos de configuração desnecessários.
+    The user writes the script body (exports, WM, app exec…).
+    Only the shebang is inserted automatically — everything else is from the user,
+    which ensures high compatibility without unnecessary config files.
 
-    Exemplo de `commands`:
+    Example `commands`:
         export GTK_THEME=Adwaita:dark
         openbox &
         exec pcmanfm
@@ -182,13 +182,13 @@ def create_app(data):
     app_id      = f"app_{int(time.time() * 1000)}"
     name        = data.get("name",        "App").strip()
     description = data.get("description", "").strip()
-    commands    = data.get("commands",    "").strip()   # corpo do bash script
+    commands    = data.get("commands",    "").strip()   # bash script body
     icon_b64    = data.get("icon",        "")           # "data:image/png;base64,..."
 
     if not commands:
         raise ValueError("Commands are required")
 
-    # ── Salva o ícone ─────────────────────────────────────────
+    # ── Save the icon ─────────────────────────────────────────
     icon_url = None
     if icon_b64 and "," in icon_b64:
         header, raw = icon_b64.split(",", 1)
@@ -197,18 +197,18 @@ def create_app(data):
             f.write(base64.b64decode(raw))
         icon_url = f"/api/apps/{app_id}/icon"
 
-    # ── Monta o xstartup (bash script) ────────────────────────
+    # ── Build the xstartup (bash script) ──────────────────────
     xstartup = create_xstartup(app_id, commands)
 
-    # ── Encontra portas livres ────────────────────────────────
+    # ── Find free ports ───────────────────────────────────────
     display  = find_free_display()
     ws_port  = find_free_ws_port()
     if display is None or ws_port is None:
         raise RuntimeError("No free display or websockify port available")
     vnc_port = 5900 + display
 
-    # ── Inicia o VNC server ───────────────────────────────────
-    # -SecurityTypes None → sem senha (remova se preferir usar vncpasswd)
+    # ── Start the VNC server ──────────────────────────────────
+    # -SecurityTypes None → no password (remove if you prefer to use vncpasswd)
     subprocess.Popen(
         ["vncserver", f":{display}",
          "-xstartup", xstartup,
@@ -218,16 +218,16 @@ def create_app(data):
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    time.sleep(2)   # aguarda o Xvnc estar pronto
+    time.sleep(2)   # wait for Xvnc to be ready
 
-    # ── Inicia websockify apontando para o noVNC do projeto ───
+    # ── Start websockify pointing to the project's noVNC ──────
     # websockify --web ./noVNC  WS_PORT  localhost:VNC_PORT
     ws_proc = subprocess.Popen(
         ["websockify", "--web", NOVNC_DIR,
          str(ws_port), f"localhost:{vnc_port}"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        preexec_fn=os.setsid,   # grupo próprio → killpg funciona corretamente
+        preexec_fn=os.setsid,   # own group → killpg works correctly
     )
 
     app = {
@@ -252,16 +252,16 @@ def delete_app(app_id):
     if not app:
         return {"error": "App not found"}
 
-    # Mata o websockify pelo group id
+    # Kill websockify by group id
     try:
         os.killpg(os.getpgid(app["ws_pid"]), signal.SIGTERM)
     except (ProcessLookupError, PermissionError, OSError):
         pass
 
-    # Mata o VNC server pelo número de display
+    # Kill the VNC server by display number
     run_cmd(f"vncserver -kill :{app['display']} 2>/dev/null")
 
-    # Remove arquivos do app
+    # Remove app files
     for p in [
         os.path.join(ICONS_DIR,     f"{app_id}.png"),
         os.path.join(ICONS_DIR,     f"{app_id}.jpg"),
