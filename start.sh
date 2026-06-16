@@ -5,6 +5,7 @@ export GALLIUM_DRIVER=llvmpipe
 
 apt update -y
 apt install -y python3 ttyd tigervnc xfce4 xfce-goodies root-repo x11-repo termux-api tmux make golang npm udocker python-cryptography openssl
+pkg install -y python3 ttyd tigervnc xfce4 xfce-goodies root-repo x11-repo termux-api tmux make golang npm udocker python-cryptography openssl
 
 export ANDROID_API_LEVEL=24
 pip install cryptography --break-system-packages 2>/dev/null || pip install cryptography
